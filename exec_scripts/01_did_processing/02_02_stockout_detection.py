@@ -124,10 +124,12 @@ def identify_stockout_periods(
     min_stockout_weeks: int = MIN_STOCKOUT_WEEKS
 ) -> List[Dict]:
     """
-    Ідентифікувати періоди stock-out для одного препарату.
+    Ідентифікувати періоди stock-out для одного препарату (векторизовано).
 
     Stock-out = тиждень без продажів (Q == 0).
     Період stock-out = послідовні тижні з Q=0.
+
+    Використовує vectorized diff/cumsum замість iterrows() для швидкості.
 
     Args:
         df_drug: Дані одного препарату (DRUGS_ID) з колонками: Date, Q
@@ -140,40 +142,35 @@ def identify_stockout_periods(
         return []
 
     # Сортуємо по датах
-    df_sorted = df_drug.sort_values('Date').copy()
+    df_sorted = df_drug[['Date', 'Q']].sort_values('Date').reset_index(drop=True)
+
+    # Vectorized: визначаємо тижні без продажів
+    is_zero = (df_sorted['Q'] == 0).astype(int)
+
+    if is_zero.sum() == 0:
+        return []
+
+    # Групуємо послідовні нулі: зміна стану створює нову групу
+    # diff() != 0 означає зміну стану (з продажів на 0 або навпаки)
+    state_change = is_zero.diff().fillna(is_zero.iloc[0]).ne(0).cumsum()
+
+    # Фільтруємо тільки нульові групи
+    df_sorted['_group'] = state_change
+    df_sorted['_is_zero'] = is_zero
+
+    zero_groups = df_sorted[df_sorted['_is_zero'] == 1].groupby('_group')
 
     stockout_periods = []
-    current_stockout_start = None
-    current_stockout_weeks = 0
-
-    for _, row in df_sorted.iterrows():
-        week = row['Date']
-        has_sales = row['Q'] > 0
-
-        if not has_sales:
-            # Stock-out тиждень
-            if current_stockout_start is None:
-                current_stockout_start = week
-            current_stockout_weeks += 1
-        else:
-            # Продажі були - закриваємо поточний stock-out період
-            if current_stockout_start is not None and current_stockout_weeks >= min_stockout_weeks:
-                stockout_periods.append({
-                    'start': current_stockout_start,
-                    'end': week - timedelta(days=7),
-                    'weeks': current_stockout_weeks
-                })
-            current_stockout_start = None
-            current_stockout_weeks = 0
-
-    # Останній період (якщо закінчується stock-out)
-    if current_stockout_start is not None and current_stockout_weeks >= min_stockout_weeks:
-        last_week = df_sorted['Date'].max()
-        stockout_periods.append({
-            'start': current_stockout_start,
-            'end': last_week,
-            'weeks': current_stockout_weeks
-        })
+    for _, group in zero_groups:
+        weeks = len(group)
+        if weeks >= min_stockout_weeks:
+            stockout_start = group['Date'].iloc[0]
+            stockout_end = group['Date'].iloc[-1]
+            stockout_periods.append({
+                'start': stockout_start,
+                'end': stockout_end,
+                'weeks': weeks
+            })
 
     return stockout_periods
 

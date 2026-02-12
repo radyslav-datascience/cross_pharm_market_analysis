@@ -48,7 +48,7 @@ import sys
 import argparse
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 
 import pandas as pd
 import numpy as np
@@ -207,21 +207,23 @@ def load_aggregation_data(client_id: int, inn_id: int, paths: Dict[str, Path]) -
 
 def calculate_lifts_for_event(
     event: pd.Series,
-    df_mapping: pd.DataFrame,
-    df_agg: pd.DataFrame
+    event_subs: pd.DataFrame,
+    df_agg: pd.DataFrame,
+    drug_index: Optional[Dict[int, pd.DataFrame]] = None
 ) -> List[Dict[str, Any]]:
     """
     Розрахунок LIFT для кожного substitute в одній stock-out події.
 
     Args:
         event: Рядок з did_results (одна подія)
-        df_mapping: Substitute mapping
+        event_subs: Substitute mapping для цієї конкретної події
         df_agg: Агреговані дані INN групи
+        drug_index: Попередньо побудований індекс {DRUGS_ID: DataFrame}
+                    (опціонально, для оптимізації)
 
     Returns:
         List of dicts з LIFT per substitute
     """
-    event_id = event['EVENT_ID']
     inn_id = event['INN_ID']
     inn_name = event['INN_NAME']
     stockout_drug_id = event['DRUGS_ID']
@@ -234,11 +236,12 @@ def calculate_lifts_for_event(
     stockout_start = event['STOCKOUT_START']
     stockout_end = event['STOCKOUT_END']
 
-    # Отримуємо substitutes для цієї події
-    event_subs = df_mapping[df_mapping['EVENT_ID'] == event_id]
-
     if len(event_subs) == 0:
         return []
+
+    # Побудова індексу якщо не передано
+    if drug_index is None:
+        drug_index = {did: grp for did, grp in df_agg.groupby('DRUGS_ID')}
 
     results = []
 
@@ -248,10 +251,10 @@ def calculate_lifts_for_event(
         sub_nfc1 = sub['SUBSTITUTE_NFC1_ID']
         same_nfc1 = sub['SAME_NFC1']
 
-        # Дані substitute
-        df_sub = df_agg[df_agg['DRUGS_ID'] == sub_drug_id]
+        # Використовуємо pre-indexed lookup замість фільтрації
+        df_sub = drug_index.get(sub_drug_id)
 
-        if len(df_sub) == 0:
+        if df_sub is None or len(df_sub) == 0:
             continue
 
         # Розрахунок LIFT
@@ -276,7 +279,7 @@ def calculate_lifts_for_event(
             lift = 0.0
 
         results.append({
-            'EVENT_ID': event_id,
+            'EVENT_ID': event['EVENT_ID'],
             'INN_ID': inn_id,
             'INN_NAME': inn_name,
             'STOCKOUT_DRUG_ID': stockout_drug_id,
@@ -565,21 +568,40 @@ def process_market(client_id: int) -> Dict[str, Any]:
 
     all_event_lifts = []
     inn_cache = {}  # Кеш агрегованих даних по INN
+    drug_index_cache = {}  # Кеш pre-indexed drug lookups по INN
+
+    # Pre-index df_mapping по EVENT_ID для O(1) lookup
+    mapping_by_event = {eid: grp for eid, grp in df_mapping.groupby('EVENT_ID')}
 
     for idx, event in df_did_valid.iterrows():
         inn_id = event['INN_ID']
+        event_id = event['EVENT_ID']
 
         # Завантажуємо агреговані дані (з кешу якщо є)
         if inn_id not in inn_cache:
             inn_cache[inn_id] = load_aggregation_data(client_id, inn_id, paths)
+            # Pre-index по DRUGS_ID для цього INN
+            df_cached = inn_cache[inn_id]
+            if len(df_cached) > 0:
+                drug_index_cache[inn_id] = {did: grp for did, grp in df_cached.groupby('DRUGS_ID')}
+            else:
+                drug_index_cache[inn_id] = {}
 
         df_agg = inn_cache[inn_id]
 
         if len(df_agg) == 0:
             continue
 
-        # Розраховуємо LIFT для кожного substitute
-        event_lifts = calculate_lifts_for_event(event, df_mapping, df_agg)
+        # Отримуємо substitutes для цієї події через pre-indexed lookup
+        event_subs = mapping_by_event.get(event_id)
+        if event_subs is None or len(event_subs) == 0:
+            continue
+
+        # Розраховуємо LIFT для кожного substitute (з pre-indexed drug lookup)
+        event_lifts = calculate_lifts_for_event(
+            event, event_subs, df_agg,
+            drug_index=drug_index_cache.get(inn_id)
+        )
         all_event_lifts.extend(event_lifts)
 
     print(f"  Розраховано LIFT записів: {len(all_event_lifts):,}")

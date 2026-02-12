@@ -153,7 +153,10 @@ def parse_period_id(period_id: int) -> datetime:
 
 def parse_period_id_series(series: pd.Series) -> pd.Series:
     """
-    Парсинг серії PERIOD_ID у datetime.
+    Парсинг серії PERIOD_ID у datetime (векторизовано).
+
+    Використовує pandas vectorized string operations замість .apply()
+    для значного прискорення на великих серіях.
 
     Args:
         series: pd.Series з PERIOD_ID
@@ -161,7 +164,20 @@ def parse_period_id_series(series: pd.Series) -> pd.Series:
     Returns:
         pd.Series: Серія datetime
     """
-    return series.apply(parse_period_id)
+    s = series.astype(str)
+    year = s.str[:4].astype(int)
+    week_day_code = s.str[4:].astype(int)
+
+    week = week_day_code // 7
+    day_of_week = week_day_code % 7
+
+    # Базова дата: 1 січня відповідного року
+    base_dates = pd.to_datetime(year.astype(str) + '-01-01')
+
+    # Додаємо тижні та дні
+    result = base_dates + pd.to_timedelta(week * 7 + day_of_week, unit='D')
+
+    return result
 
 
 def add_date_column(
@@ -186,7 +202,8 @@ def add_date_column(
     df[date_col] = parse_period_id_series(df[period_col])
 
     if align_monday:
-        df[date_col] = df[date_col].apply(align_to_monday)
+        # Vectorized: dt.weekday повертає 0=Mon, 6=Sun
+        df[date_col] = df[date_col] - pd.to_timedelta(df[date_col].dt.weekday, unit='D')
         print(f"  Створено колонку {date_col} з {period_col} (вирівняно по понеділках)")
     else:
         print(f"  Створено колонку {date_col} з {period_col}")
@@ -275,9 +292,13 @@ def fill_gaps(
     show_progress: bool = True
 ) -> pd.DataFrame:
     """
-    GAP FILLING для всього датафрейму.
+    GAP FILLING для всього датафрейму (оптимізована версія).
 
     Заповнює пропущені тижні нулями для кожної пари (PHARM_ID, DRUGS_ID).
+    Використовує vectorized batch-підхід:
+    1. Агрегація дублікатів одним викликом groupby
+    2. Побудова повного date range для кожної групи через MultiIndex
+    3. Merge замість ітерації per group
 
     Args:
         df: Вхідний датафрейм
@@ -293,31 +314,56 @@ def fill_gaps(
     if categorical_cols is None:
         categorical_cols = ['DRUGS_NAME', 'INN_NAME', 'INN_ID', 'NFC1_ID', 'NFC_ID']
 
-    result_frames = []
-    groups = df.groupby(group_cols)
-    total_groups = len(groups)
+    existing_value_cols = [c for c in value_cols if c in df.columns]
+    existing_cat_cols = [c for c in categorical_cols if c in df.columns]
+    total_groups = df.groupby(group_cols).ngroups
 
     if show_progress:
-        print(f"GAP FILLING для {total_groups:,} груп...")
+        print(f"GAP FILLING для {total_groups:,} груп (vectorized)...")
 
-    for i, (group_keys, group_df) in enumerate(groups):
-        filled = fill_gaps_for_group(
-            group_df,
-            date_col=date_col,
-            value_cols=value_cols,
-            id_cols=group_cols,
-            categorical_cols=categorical_cols
+    original_len = len(df)
+
+    # --- Крок 1: Агрегація дублікатів по (group_cols + date_col) ---
+    agg_dict = {col: 'sum' for col in existing_value_cols}
+    agg_dict.update({col: 'first' for col in existing_cat_cols})
+    all_group_keys = group_cols + [date_col]
+    df_agg = df.groupby(all_group_keys, sort=False).agg(agg_dict).reset_index()
+
+    # --- Крок 2: Побудова повних date ranges для кожної групи ---
+    # Отримуємо min/max дату для кожної групи
+    date_ranges = df_agg.groupby(group_cols)[date_col].agg(['min', 'max']).reset_index()
+
+    # Генеруємо повні тижневі ranges для всіх груп
+    skeleton_rows = []
+    for _, row in date_ranges.iterrows():
+        full_dates = pd.date_range(start=row['min'], end=row['max'], freq='7D')
+        group_key_vals = {col: row[col] for col in group_cols}
+        chunk = pd.DataFrame({date_col: full_dates})
+        for col in group_cols:
+            chunk[col] = group_key_vals[col]
+        skeleton_rows.append(chunk)
+
+    if not skeleton_rows:
+        return df.copy()
+
+    skeleton = pd.concat(skeleton_rows, ignore_index=True)
+
+    # --- Крок 3: Left join skeleton з реальними даними ---
+    result = skeleton.merge(df_agg, on=all_group_keys, how='left')
+
+    # --- Крок 4: Заповнення пропусків ---
+    # Числові колонки — нулями
+    for col in existing_value_cols:
+        result[col] = result[col].fillna(0)
+
+    # Категоріальні — forward/backward fill в межах групи
+    if existing_cat_cols:
+        result[existing_cat_cols] = result.groupby(group_cols)[existing_cat_cols].transform(
+            lambda x: x.ffill().bfill()
         )
-        result_frames.append(filled)
-
-        # Прогрес кожні 1000 груп
-        if show_progress and (i + 1) % 1000 == 0:
-            print(f"  Оброблено {i + 1:,} / {total_groups:,} груп")
-
-    result = pd.concat(result_frames, ignore_index=True)
 
     if show_progress:
-        added_rows = len(result) - len(df)
+        added_rows = len(result) - original_len
         print(f"  Додано {added_rows:,} рядків (пропущені тижні)")
 
     return result
@@ -345,11 +391,15 @@ def calculate_notsold_percent(
     Returns:
         pd.DataFrame: Датафрейм з колонкою NOTSOLD_PERCENT
     """
-    notsold_stats = df.groupby(group_cols).apply(
-        lambda x: pd.Series({
-            'total_weeks': len(x),
-            'zero_weeks': (x[quantity_col] == 0).sum()
-        })
+    # Guard: пустий DataFrame → повертаємо пустий результат з правильними колонками
+    if df.empty:
+        return pd.DataFrame(columns=group_cols + ['total_weeks', 'zero_weeks', 'NOTSOLD_PERCENT'])
+
+    # Використовуємо .agg() замість .apply(pd.Series) — надійніше з pandas 2.x
+    # (.apply на пустому DataFrame повертає колонки оригінального df замість заданих)
+    notsold_stats = df.groupby(group_cols)[quantity_col].agg(
+        total_weeks='count',
+        zero_weeks=lambda x: (x == 0).sum()
     ).reset_index()
 
     notsold_stats['NOTSOLD_PERCENT'] = (

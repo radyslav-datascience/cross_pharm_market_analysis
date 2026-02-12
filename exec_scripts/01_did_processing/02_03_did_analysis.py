@@ -254,7 +254,8 @@ def process_event_post_period(
 def find_valid_substitutes(
     event: pd.Series,
     df_inn: pd.DataFrame,
-    client_id: int
+    client_id: int,
+    drug_index: Optional[Dict[int, pd.DataFrame]] = None
 ) -> List[Dict[str, Any]]:
     """
     Знайти валідні substitutes для stock-out події.
@@ -267,6 +268,8 @@ def find_valid_substitutes(
         event: Інформація про подію
         df_inn: Агреговані дані INN групи
         client_id: ID цільової аптеки
+        drug_index: Попередньо побудований індекс {DRUGS_ID: DataFrame}
+                    для TARGET аптеки (опціонально, для оптимізації)
 
     Returns:
         List[Dict]: Список валідних substitutes
@@ -276,19 +279,16 @@ def find_valid_substitutes(
     stockout_start = event['STOCKOUT_START']
     stockout_end = event['STOCKOUT_END']
 
-    # Дані тільки TARGET аптеки
-    df_target = df_inn[df_inn['PHARM_ID'] == client_id]
-
-    # Всі інші препарати в INN групі (потенційні substitutes)
-    other_drugs = df_target[df_target['DRUGS_ID'] != target_drug_id]
-
-    if len(other_drugs) == 0:
-        return []
+    # Побудова індексу якщо не передано
+    if drug_index is None:
+        df_target = df_inn[df_inn['PHARM_ID'] == client_id]
+        drug_index = {did: grp for did, grp in df_target.groupby('DRUGS_ID')}
 
     valid_substitutes = []
 
-    for drug_id in other_drugs['DRUGS_ID'].unique():
-        df_sub = other_drugs[other_drugs['DRUGS_ID'] == drug_id]
+    for drug_id, df_sub in drug_index.items():
+        if drug_id == target_drug_id:
+            continue
 
         if len(df_sub) == 0:
             continue
@@ -329,7 +329,8 @@ def calculate_did_for_event(
     event: pd.Series,
     df_inn: pd.DataFrame,
     client_id: int,
-    valid_substitutes: List[Dict]
+    valid_substitutes: List[Dict],
+    drug_index: Optional[Dict[int, pd.DataFrame]] = None
 ) -> Dict[str, Any]:
     """
     Розрахувати DiD метрики для однієї stock-out події.
@@ -339,6 +340,8 @@ def calculate_did_for_event(
         df_inn: Агреговані дані INN групи
         client_id: ID цільової аптеки
         valid_substitutes: Список валідних substitutes
+        drug_index: Попередньо побудований індекс {DRUGS_ID: DataFrame}
+                    для TARGET аптеки (опціонально, для оптимізації)
 
     Returns:
         Dict з DiD результатами
@@ -351,12 +354,13 @@ def calculate_did_for_event(
     stockout_start = event['STOCKOUT_START']
     stockout_end = event['STOCKOUT_END']
 
-    # Дані TARGET аптеки (в агрегованих файлах є тільки TARGET)
-    df_target = df_inn[df_inn['PHARM_ID'] == client_id]
+    # Побудова індексу якщо не передано
+    if drug_index is None:
+        df_target = df_inn[df_inn['PHARM_ID'] == client_id]
+        drug_index = {did: grp for did, grp in df_target.groupby('DRUGS_ID')}
 
     # === 1. MARKET_GROWTH ===
     # Ринкові продажі в PRE-періоді (весь ринок, не тільки TARGET)
-    # Використовуємо MARKET_TOTAL_DRUGS_PACK для коректного тренду ринку
     df_market_pre = df_inn[
         (df_inn['Date'] >= pre_start) &
         (df_inn['Date'] <= pre_end)
@@ -379,7 +383,10 @@ def calculate_did_for_event(
         sub_drug_id = sub['SUBSTITUTE_DRUGS_ID']
         sub_nfc1 = sub['SUBSTITUTE_NFC1_ID']
 
-        df_sub = df_target[df_target['DRUGS_ID'] == sub_drug_id]
+        # Використовуємо pre-indexed lookup замість фільтрації
+        df_sub = drug_index.get(sub_drug_id)
+        if df_sub is None or len(df_sub) == 0:
+            continue
 
         # Продажі substitute в PRE-періоді
         df_sub_pre = df_sub[
@@ -412,34 +419,36 @@ def calculate_did_for_event(
     substitutes_with_lift = sum(1 for s in substitutes_lifts if s['lift'] > 0)
 
     # === 3. LOST_SALES (target препарат у конкурентів) ===
-    # Дані по target препарату в TARGET аптеці (використовуємо MARKET_TOTAL_DRUGS_PACK)
-    df_target_drug = df_target[df_target['DRUGS_ID'] == target_drug_id]
+    # Використовуємо pre-indexed lookup
+    df_target_drug = drug_index.get(target_drug_id)
 
-    # В PRE-періоді: конкуренти = MARKET_TOTAL - Q (target)
-    df_drug_pre = df_target_drug[
-        (df_target_drug['Date'] >= pre_start) &
-        (df_target_drug['Date'] <= pre_end)
-    ]
-    # MARKET_TOTAL_DRUGS_PACK - це загальний ринок, включаючи target
-    # Конкуренти = MARKET_TOTAL - Q(target)
-    if len(df_drug_pre) > 0 and 'MARKET_TOTAL_DRUGS_PACK' in df_drug_pre.columns:
-        market_total_pre = df_drug_pre['MARKET_TOTAL_DRUGS_PACK'].sum()
-        target_pre = df_drug_pre['Q'].sum()
-        comp_pre = max(0, market_total_pre - target_pre)
+    if df_target_drug is not None and len(df_target_drug) > 0:
+        # В PRE-періоді
+        df_drug_pre = df_target_drug[
+            (df_target_drug['Date'] >= pre_start) &
+            (df_target_drug['Date'] <= pre_end)
+        ]
+        if len(df_drug_pre) > 0 and 'MARKET_TOTAL_DRUGS_PACK' in df_drug_pre.columns:
+            market_total_pre = df_drug_pre['MARKET_TOTAL_DRUGS_PACK'].sum()
+            target_pre = df_drug_pre['Q'].sum()
+            comp_pre = max(0, market_total_pre - target_pre)
+        else:
+            comp_pre = 0
+
+        # Під час stock-out
+        df_drug_during = df_target_drug[
+            (df_target_drug['Date'] >= stockout_start) &
+            (df_target_drug['Date'] <= stockout_end)
+        ]
+        if len(df_drug_during) > 0 and 'MARKET_TOTAL_DRUGS_PACK' in df_drug_during.columns:
+            comp_during = df_drug_during['MARKET_TOTAL_DRUGS_PACK'].sum()
+        else:
+            comp_during = 0
     else:
         comp_pre = 0
-
-    # Під час stock-out: Q(target)=0, тому конкуренти = MARKET_TOTAL
-    df_drug_during = df_target_drug[
-        (df_target_drug['Date'] >= stockout_start) &
-        (df_target_drug['Date'] <= stockout_end)
-    ]
-    if len(df_drug_during) > 0 and 'MARKET_TOTAL_DRUGS_PACK' in df_drug_during.columns:
-        comp_during = df_drug_during['MARKET_TOTAL_DRUGS_PACK'].sum()
-    else:
         comp_during = 0
 
-    # LIFT конкурентів (збільшення продажів target препарату у конкурентів)
+    # LIFT конкурентів
     comp_expected = calculate_expected(comp_pre, market_growth)
     lost_sales = calculate_lift(comp_during, comp_expected)
 
@@ -533,6 +542,11 @@ def process_market_did(client_id: int) -> Dict:
         if df_inn.empty:
             continue
 
+        # Pre-index: побудова словника {DRUGS_ID: DataFrame} для TARGET аптеки
+        # Будується один раз per INN, використовується всіма подіями цієї INN
+        df_target_inn = df_inn[df_inn['PHARM_ID'] == client_id]
+        drug_index = {did: grp for did, grp in df_target_inn.groupby('DRUGS_ID')}
+
         # Обробка кожної події
         for idx, event in inn_events.iterrows():
             event_id = event['EVENT_ID']
@@ -552,8 +566,10 @@ def process_market_did(client_id: int) -> Dict:
             event_with_post['POST_STATUS'] = post_result['POST_STATUS']
             event_with_post['POST_VALID'] = post_result['POST_VALID']
 
-            # 2. Пошук валідних substitutes
-            valid_substitutes = find_valid_substitutes(event_with_post, df_inn, client_id)
+            # 2. Пошук валідних substitutes (з pre-indexed drug_index)
+            valid_substitutes = find_valid_substitutes(
+                event_with_post, df_inn, client_id, drug_index=drug_index
+            )
 
             if len(valid_substitutes) == 0:
                 validation_stats['no_substitutes'] += 1
@@ -573,8 +589,11 @@ def process_market_did(client_id: int) -> Dict:
                     **sub
                 })
 
-            # 3. DiD розрахунки
-            did_result = calculate_did_for_event(event_with_post, df_inn, client_id, valid_substitutes)
+            # 3. DiD розрахунки (з pre-indexed drug_index)
+            did_result = calculate_did_for_event(
+                event_with_post, df_inn, client_id, valid_substitutes,
+                drug_index=drug_index
+            )
 
             # Перевірка чи є ефект
             if did_result['TOTAL_EFFECT'] < MIN_TOTAL_FOR_SHARE:
