@@ -56,7 +56,7 @@ For each drug present across multiple markets, produce:
 
 ---
 
-## � Research Results
+## 📊 Research Results
 
 > **Project Status: COMPLETED** — All phases executed, data validated, results exported.
 
@@ -103,7 +103,7 @@ The pipeline produces three categories of outputs per market:
 
 ---
 
-## �💼 Business Context
+## 💼 Business Context
 
 ### The Problem
 
