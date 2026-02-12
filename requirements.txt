@@ -1,0 +1,22 @@
+# =============================================================================
+# requirements.txt — cross_pharm_market_analysis
+# =============================================================================
+# Python 3.11+ required
+# Install: pip install -r requirements.txt
+# Or with conda: conda install --file requirements.txt
+# =============================================================================
+
+# Core data processing
+pandas>=2.2.0
+numpy>=2.0.0
+
+# Statistical analysis
+scipy>=1.12.0
+
+# Visualization
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# Excel report generation
+openpyxl>=3.1.0
+xlsxwriter>=3.1.0
