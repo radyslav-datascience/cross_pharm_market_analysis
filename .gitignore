@@ -43,6 +43,15 @@ pip-delete-this-directory.txt
 .Spotlight-V100
 .Trashes
 
+# ----- DATA (raw CSV files, large outputs) -----
+data/raw/
+data/processed_data/
+
+# ----- RESULTS (generated outputs) -----
+results/cross_market_data/
+results/data_reports/
+results/substitution_research/
+
 # ----- TEMPORARY / MISC -----
 *.tmp
 *.bak
