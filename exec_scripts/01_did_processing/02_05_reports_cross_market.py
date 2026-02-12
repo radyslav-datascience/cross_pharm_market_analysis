@@ -11,7 +11,8 @@ Phase 1, Step 5: Reports Generation
 Вихідні дані:
 - results/data_reports/reports_{CLIENT_ID}/01_technical_report_{CLIENT_ID}.xlsx
 - results/data_reports/reports_{CLIENT_ID}/02_business_report_{CLIENT_ID}.xlsx
-- results/cross_market_data/cross_market_{CLIENT_ID}.csv
+- results/cross_market_data/market_substitution_{CLIENT_ID}/sub_coef_{CLIENT_ID}.csv
+- results/cross_market_data/market_substitution_{CLIENT_ID}/sub_drugs_{CLIENT_ID}.csv
 
 Використання:
     python exec_scripts/01_did_processing/02_05_reports_cross_market.py --market_id 28670
@@ -482,16 +483,17 @@ def create_excel_report(
     wb.save(output_path)
 
 
-def create_cross_market_csv(
+def create_sub_coef_csv(
     base_df: pd.DataFrame,
     substitute_shares: pd.DataFrame,
     client_id: int,
     output_path: str
 ) -> None:
     """
-    Створити CSV-файл для cross-market аналізу.
+    Створити CSV-файл з коефіцієнтами субституції (sub_coef).
 
-    Формат: flat data з усіма ключовими метриками.
+    Формат: flat data з усіма ключовими метриками per drug.
+    Раніше: cross_market_{ID}.csv → тепер: sub_coef_{ID}.csv
     """
     # Додаємо CLIENT_ID до base_df
     cross_df = base_df.copy()
@@ -523,6 +525,85 @@ def create_cross_market_csv(
     cross_df.to_csv(output_path, index=False)
 
 
+def create_sub_drugs_csv(
+    base_df: pd.DataFrame,
+    substitute_shares: pd.DataFrame,
+    client_id: int,
+    output_path: str
+) -> int:
+    """
+    Створити flat CSV з деталями субститутів для кожного stockout-препарату.
+
+    Кожен рядок = одна пара (stockout_drug → substitute_drug).
+    SUBSTITUTE_SHARE як десяткове число (0.3766), не відсоток.
+    SUBSTITUTE_RANK — ранг замінника (1 = найбільша частка).
+
+    Returns:
+        Кількість рядків у результаті
+    """
+    # Порядок препаратів: як в base_df (CRITICAL → SUBSTITUTABLE, по SHARE_LOST)
+    category_order = {'CRITICAL': 0, 'MIXED': 1, 'SUBSTITUTABLE': 2}
+    sorted_drugs = base_df.copy()
+    sorted_drugs['_sort'] = sorted_drugs['CLASSIFICATION'].map(category_order).fillna(1)
+    sorted_drugs = sorted_drugs.sort_values(
+        ['_sort', 'SHARE_LOST'],
+        ascending=[True, False]
+    ).drop('_sort', axis=1)
+
+    # Побудова drug info для швидкого доступу
+    drug_info = sorted_drugs.set_index('DRUGS_ID')[
+        ['DRUGS_NAME', 'INN_ID', 'INN_NAME', 'NFC1_ID']
+    ].to_dict('index')
+
+    rows = []
+
+    for drug_id in sorted_drugs['DRUGS_ID']:
+        info = drug_info[drug_id]
+
+        # Отримати всіх субститутів, сортованих по SUBSTITUTE_SHARE спадаючи
+        drug_subs = substitute_shares[
+            substitute_shares['STOCKOUT_DRUG_ID'] == drug_id
+        ].sort_values('SUBSTITUTE_SHARE', ascending=False)
+
+        if len(drug_subs) == 0:
+            # Препарат без субститутів — один рядок з порожніми полями
+            rows.append({
+                'CLIENT_ID': client_id,
+                'STOCKOUT_DRUG_ID': drug_id,
+                'STOCKOUT_DRUG_NAME': info['DRUGS_NAME'],
+                'INN_ID': info['INN_ID'],
+                'INN_NAME': info['INN_NAME'],
+                'NFC1_ID': info['NFC1_ID'],
+                'SUBSTITUTE_DRUG_ID': '',
+                'SUBSTITUTE_DRUG_NAME': '',
+                'SUBSTITUTE_NFC1_ID': '',
+                'SAME_NFC1': '',
+                'SUBSTITUTE_SHARE': '',
+                'SUBSTITUTE_RANK': 0,
+            })
+        else:
+            for rank, (_, sub) in enumerate(drug_subs.iterrows(), 1):
+                rows.append({
+                    'CLIENT_ID': client_id,
+                    'STOCKOUT_DRUG_ID': drug_id,
+                    'STOCKOUT_DRUG_NAME': info['DRUGS_NAME'],
+                    'INN_ID': info['INN_ID'],
+                    'INN_NAME': info['INN_NAME'],
+                    'NFC1_ID': info['NFC1_ID'],
+                    'SUBSTITUTE_DRUG_ID': sub['SUBSTITUTE_DRUG_ID'],
+                    'SUBSTITUTE_DRUG_NAME': sub['SUBSTITUTE_DRUG_NAME'],
+                    'SUBSTITUTE_NFC1_ID': sub['SUBSTITUTE_NFC1_ID'],
+                    'SAME_NFC1': sub['SAME_NFC1'],
+                    'SUBSTITUTE_SHARE': round(sub['SUBSTITUTE_SHARE'] / 100, 6),
+                    'SUBSTITUTE_RANK': rank,
+                })
+
+    result_df = pd.DataFrame(rows)
+    result_df.to_csv(output_path, index=False)
+
+    return len(result_df)
+
+
 # ============================================================================
 # ОСНОВНА ФУНКЦІЯ ОБРОБКИ
 # ============================================================================
@@ -541,10 +622,10 @@ def process_market(client_id: int) -> Dict[str, Any]:
 
     # Створюємо директорії
     reports_dir = RESULTS_PATH / 'data_reports' / f'reports_{client_id}'
-    cross_market_dir = RESULTS_PATH / 'cross_market_data'
+    market_sub_dir = RESULTS_PATH / 'cross_market_data' / f'market_substitution_{client_id}'
 
     reports_dir.mkdir(parents=True, exist_ok=True)
-    cross_market_dir.mkdir(parents=True, exist_ok=True)
+    market_sub_dir.mkdir(parents=True, exist_ok=True)
 
     # Завантажуємо дані
     print("Loading data...")
@@ -579,12 +660,19 @@ def process_market(client_id: int) -> Dict[str, Any]:
     print(f"  Saved: {business_output}")
     print(f"  Rows: {len(business_report_df)}")
 
-    # 3. Cross-market CSV
-    print("\nGenerating cross-market CSV...")
-    csv_output = cross_market_dir / f'cross_market_{client_id}.csv'
-    create_cross_market_csv(base_df, substitute_shares, client_id, str(csv_output))
-    print(f"  Saved: {csv_output}")
+    # 3. Sub-coef CSV (коефіцієнти субституції per drug)
+    print("\nGenerating sub_coef CSV...")
+    coef_output = market_sub_dir / f'sub_coef_{client_id}.csv'
+    create_sub_coef_csv(base_df, substitute_shares, client_id, str(coef_output))
+    print(f"  Saved: {coef_output}")
     print(f"  Rows: {len(base_df)}")
+
+    # 4. Sub-drugs CSV (деталі субститутів per drug)
+    print("\nGenerating sub_drugs CSV...")
+    drugs_output = market_sub_dir / f'sub_drugs_{client_id}.csv'
+    sub_drugs_rows = create_sub_drugs_csv(base_df, substitute_shares, client_id, str(drugs_output))
+    print(f"  Saved: {drugs_output}")
+    print(f"  Rows: {sub_drugs_rows}")
 
     # Статистика
     end_time = datetime.now()
@@ -597,7 +685,8 @@ def process_market(client_id: int) -> Dict[str, Any]:
         'pairs_count': len(substitute_shares),
         'tech_report_rows': len(tech_report_df),
         'business_report_rows': len(business_report_df),
-        'cross_market_rows': len(base_df),
+        'sub_coef_rows': len(base_df),
+        'sub_drugs_rows': sub_drugs_rows,
         'critical_count': category_counts.get('CRITICAL', 0),
         'substitutable_count': category_counts.get('SUBSTITUTABLE', 0),
         'processing_time_sec': processing_time

@@ -5,7 +5,7 @@ Phase 2, Step 1: Data Preparation
 
 Вхідні дані:
 - data/raw/Rd2_{CLIENT_ID}.csv (для all_drugs_list)
-- results/cross_market_data/cross_market_{CLIENT_ID}.csv (Phase 1 результати)
+- results/cross_market_data/market_substitution_{CLIENT_ID}/sub_coef_{CLIENT_ID}.csv (Phase 1 результати)
 - data/processed_data/00_preproc_results/target_pharmacies_list.csv
 
 Вихідні дані:
@@ -133,12 +133,12 @@ def load_cross_market_data() -> Tuple[pd.DataFrame, List[int]]:
     print("ЗАВАНТАЖЕННЯ CROSS-MARKET ДАНИХ (Phase 1)")
     print("=" * 60)
 
-    cross_market_files = list(CROSS_MARKET_PATH.glob("cross_market_*.csv"))
+    cross_market_files = list(CROSS_MARKET_PATH.glob("market_substitution_*/sub_coef_*.csv"))
 
     if not cross_market_files:
-        raise ValueError(f"Не знайдено cross_market файлів у {CROSS_MARKET_PATH}")
+        raise ValueError(f"Не знайдено sub_coef файлів у {CROSS_MARKET_PATH}")
 
-    print(f"Знайдено cross_market файлів: {len(cross_market_files)}")
+    print(f"Знайдено sub_coef файлів: {len(cross_market_files)}")
 
     all_data = []
     market_ids = []
@@ -146,7 +146,7 @@ def load_cross_market_data() -> Tuple[pd.DataFrame, List[int]]:
     for cm_file in sorted(cross_market_files):
         try:
             # Витягуємо market_id з назви файлу
-            market_id = int(cm_file.stem.replace("cross_market_", ""))
+            market_id = int(cm_file.stem.replace("sub_coef_", ""))
             market_ids.append(market_id)
 
             df = pd.read_csv(cm_file)

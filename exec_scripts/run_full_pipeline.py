@@ -325,7 +325,7 @@ def run_pipeline(
     print("  Output locations:")
     print(f"    Per-market data:   data/processed_data/01_per_market/")
     print(f"    Market reports:    results/data_reports/")
-    print(f"    Cross-market CSV:  results/cross_market_data/")
+    print(f"    Cross-market data: results/cross_market_data/market_substitution_*/")
     print(f"    Coefficients:      results/substitution_research/01_preparation/")
     print()
 

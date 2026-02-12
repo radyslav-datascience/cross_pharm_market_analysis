@@ -48,6 +48,7 @@ import sys
 import argparse
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Any, Tuple
 
 import pandas as pd
@@ -516,6 +517,66 @@ def generate_metadata(
 
 
 # =============================================================================
+# INN-GROUP PROCESSING (для ThreadPoolExecutor)
+# =============================================================================
+
+def _process_inn_group_substitute(
+    inn_id: int,
+    inn_events: pd.DataFrame,
+    client_id: int,
+    paths: Dict[str, Path],
+    mapping_by_event: Dict[str, pd.DataFrame]
+) -> List[Dict[str, Any]]:
+    """
+    Обробка однієї INN-групи для Substitute analysis.
+
+    Ця функція виконується в окремому потоці (ThreadPoolExecutor).
+    Не має shared state — повертає локальні результати для merge.
+
+    Формули розрахунків НЕ змінені — викликається той самий
+    calculate_lifts_for_event().
+
+    Args:
+        inn_id: ID INN групи
+        inn_events: DataFrame подій для цієї INN (вже відфільтровані INTERNAL_LIFT > 0)
+        client_id: ID цільової аптеки
+        paths: Словник шляхів
+        mapping_by_event: Dict {EVENT_ID: DataFrame} з substitute mapping
+
+    Returns:
+        List[Dict] — LIFT записи для всіх подій цієї INN
+    """
+    event_lifts = []
+
+    # Завантажуємо агреговані дані для цього INN
+    df_agg = load_aggregation_data(client_id, inn_id, paths)
+
+    if len(df_agg) == 0:
+        return event_lifts
+
+    # Pre-index по DRUGS_ID
+    drug_index = {did: grp for did, grp in df_agg.groupby('DRUGS_ID')}
+
+    # Обробка кожної події
+    for idx, event in inn_events.iterrows():
+        event_id = event['EVENT_ID']
+
+        # Отримуємо substitutes для цієї події через pre-indexed lookup
+        event_subs = mapping_by_event.get(event_id)
+        if event_subs is None or len(event_subs) == 0:
+            continue
+
+        # Розраховуємо LIFT для кожного substitute (з pre-indexed drug lookup)
+        lifts = calculate_lifts_for_event(
+            event, event_subs, df_agg,
+            drug_index=drug_index
+        )
+        event_lifts.extend(lifts)
+
+    return event_lifts
+
+
+# =============================================================================
 # MAIN PROCESSING
 # =============================================================================
 
@@ -566,43 +627,44 @@ def process_market(client_id: int) -> Dict[str, Any]:
     # === 2. Розрахунок LIFT per substitute per event ===
     print("\n[2/4] Розрахунок LIFT per substitute...")
 
-    all_event_lifts = []
-    inn_cache = {}  # Кеш агрегованих даних по INN
-    drug_index_cache = {}  # Кеш pre-indexed drug lookups по INN
-
     # Pre-index df_mapping по EVENT_ID для O(1) lookup
     mapping_by_event = {eid: grp for eid, grp in df_mapping.groupby('EVENT_ID')}
 
-    for idx, event in df_did_valid.iterrows():
-        inn_id = event['INN_ID']
-        event_id = event['EVENT_ID']
+    # Групуємо events по INN для INN-рівневого паралелізму
+    inn_event_groups = [
+        (inn_id, inn_events)
+        for inn_id, inn_events in df_did_valid.groupby('INN_ID')
+    ]
 
-        # Завантажуємо агреговані дані (з кешу якщо є)
-        if inn_id not in inn_cache:
-            inn_cache[inn_id] = load_aggregation_data(client_id, inn_id, paths)
-            # Pre-index по DRUGS_ID для цього INN
-            df_cached = inn_cache[inn_id]
-            if len(df_cached) > 0:
-                drug_index_cache[inn_id] = {did: grp for did, grp in df_cached.groupby('DRUGS_ID')}
-            else:
-                drug_index_cache[inn_id] = {}
+    # Завантажуємо параметр INN-паралелізму
+    from project_core.calculation_parameters_config.machine_parameters import OPTIMAL_THREADS
+    n_threads = min(OPTIMAL_THREADS, len(inn_event_groups))
 
-        df_agg = inn_cache[inn_id]
+    if n_threads > 1:
+        # === ПАРАЛЕЛЬНА ОБРОБКА INN-ГРУП (ThreadPoolExecutor) ===
+        all_event_lifts = []
 
-        if len(df_agg) == 0:
-            continue
+        with ThreadPoolExecutor(max_workers=n_threads) as pool:
+            futures = {
+                pool.submit(
+                    _process_inn_group_substitute,
+                    inn_id, inn_events, client_id, paths, mapping_by_event
+                ): inn_id
+                for inn_id, inn_events in inn_event_groups
+            }
 
-        # Отримуємо substitutes для цієї події через pre-indexed lookup
-        event_subs = mapping_by_event.get(event_id)
-        if event_subs is None or len(event_subs) == 0:
-            continue
+            for future in as_completed(futures):
+                inn_lifts = future.result()
+                all_event_lifts.extend(inn_lifts)
+    else:
+        # === ПОСЛІДОВНА ОБРОБКА (fallback, n_threads == 1) ===
+        all_event_lifts = []
 
-        # Розраховуємо LIFT для кожного substitute (з pre-indexed drug lookup)
-        event_lifts = calculate_lifts_for_event(
-            event, event_subs, df_agg,
-            drug_index=drug_index_cache.get(inn_id)
-        )
-        all_event_lifts.extend(event_lifts)
+        for inn_id, inn_events in inn_event_groups:
+            inn_lifts = _process_inn_group_substitute(
+                inn_id, inn_events, client_id, paths, mapping_by_event
+            )
+            all_event_lifts.extend(inn_lifts)
 
     print(f"  Розраховано LIFT записів: {len(all_event_lifts):,}")
 

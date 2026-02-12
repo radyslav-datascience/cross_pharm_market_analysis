@@ -37,6 +37,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Callable, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
+from tqdm import tqdm
 
 # Додаємо project root до sys.path
 _CURRENT_FILE = Path(__file__).resolve()
@@ -238,11 +239,17 @@ def run_markets_parallel(
             future = executor.submit(process_single_market_pipeline, client_id, step_list)
             future_to_market[future] = client_id
 
-        # Збираємо результати по мірі завершення
-        completed = 0
-        for future in as_completed(future_to_market):
+        # Збираємо результати по мірі завершення (tqdm прогрес-бар)
+        pbar = tqdm(
+            as_completed(future_to_market),
+            total=total_markets,
+            desc="  Markets",
+            unit="market",
+            disable=not show_progress,
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+        )
+        for future in pbar:
             client_id = future_to_market[future]
-            completed += 1
 
             try:
                 result = future.result(timeout=timeout_per_market)
@@ -276,8 +283,8 @@ def run_markets_parallel(
                 })
                 status_str = f"ERROR: {type(e).__name__}"
 
-            if show_progress:
-                print(f"  [{completed}/{total_markets}] Market {client_id}: {status_str}")
+            pbar.set_postfix_str(f"Market {client_id}: {status_str}")
+        pbar.close()
 
     pipeline_elapsed = time.time() - pipeline_start
 
@@ -366,7 +373,14 @@ def run_markets_sequential(
     successful = []
     failed = []
 
-    for i, client_id in enumerate(market_ids):
+    pbar = tqdm(
+        market_ids,
+        desc="  Markets",
+        unit="market",
+        disable=not show_progress,
+        bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+    )
+    for client_id in pbar:
         result = process_single_market_pipeline(client_id, steps)
 
         if result['status'] == 'success':
@@ -376,8 +390,8 @@ def run_markets_sequential(
             failed.append(result)
             status_str = f"FAILED: {result['error']}"
 
-        if show_progress:
-            print(f"  [{i+1}/{total_markets}] Market {client_id}: {status_str}")
+        pbar.set_postfix_str(f"Market {client_id}: {status_str}")
+    pbar.close()
 
     pipeline_elapsed = time.time() - pipeline_start
 

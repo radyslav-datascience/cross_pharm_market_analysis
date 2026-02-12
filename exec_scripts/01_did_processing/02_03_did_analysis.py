@@ -46,6 +46,7 @@ import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
@@ -481,6 +482,146 @@ def calculate_did_for_event(
 
 
 # =============================================================================
+# INN-GROUP PROCESSING (для ThreadPoolExecutor)
+# =============================================================================
+
+def _process_inn_group_did(
+    inn_id: int,
+    inn_events: pd.DataFrame,
+    client_id: int,
+    paths: Dict[str, Path]
+) -> Dict[str, Any]:
+    """
+    Обробка однієї INN-групи для DiD аналізу.
+
+    Ця функція виконується в окремому потоці (ThreadPoolExecutor).
+    Не має shared state — повертає локальні результати для merge.
+
+    Формули розрахунків НЕ змінені — викликаються ті самі
+    find_valid_substitutes(), calculate_did_for_event() та ін.
+
+    Args:
+        inn_id: ID INN групи
+        inn_events: DataFrame подій для цієї INN
+        client_id: ID цільової аптеки
+        paths: Словник шляхів
+
+    Returns:
+        Dict з ключами:
+            - did_results: List[Dict] — DiD результати
+            - substitute_mappings: List[Dict] — substitute mapping
+            - validation_stats: Dict — статистика валідації
+    """
+    did_results = []
+    substitute_mappings = []
+    validation_stats = {
+        'valid': 0,
+        'no_post_period': 0,
+        'no_substitutes': 0,
+        'no_effect': 0
+    }
+
+    # Завантажуємо дані INN
+    df_inn = load_inn_data(inn_id, client_id, paths)
+
+    if df_inn.empty:
+        return {
+            'did_results': did_results,
+            'substitute_mappings': substitute_mappings,
+            'validation_stats': validation_stats
+        }
+
+    # Pre-index: побудова словника {DRUGS_ID: DataFrame} для TARGET аптеки
+    df_target_inn = df_inn[df_inn['PHARM_ID'] == client_id]
+    drug_index = {did: grp for did, grp in df_target_inn.groupby('DRUGS_ID')}
+
+    # Обробка кожної події
+    for idx, event in inn_events.iterrows():
+        event_id = event['EVENT_ID']
+
+        # 1. Визначення POST-періоду
+        post_result = process_event_post_period(event, df_inn, client_id)
+
+        if not post_result['POST_VALID']:
+            validation_stats['no_post_period'] += 1
+            continue
+
+        # Додаємо POST до event
+        event_with_post = event.copy()
+        event_with_post['POST_START'] = post_result['POST_START']
+        event_with_post['POST_END'] = post_result['POST_END']
+        event_with_post['POST_WEEKS'] = post_result['POST_WEEKS']
+        event_with_post['POST_STATUS'] = post_result['POST_STATUS']
+        event_with_post['POST_VALID'] = post_result['POST_VALID']
+
+        # 2. Пошук валідних substitutes (з pre-indexed drug_index)
+        valid_substitutes = find_valid_substitutes(
+            event_with_post, df_inn, client_id, drug_index=drug_index
+        )
+
+        if len(valid_substitutes) == 0:
+            validation_stats['no_substitutes'] += 1
+
+        # Зберігаємо substitute mapping
+        for sub in valid_substitutes:
+            substitute_mappings.append({
+                'EVENT_ID': event_id,
+                'CLIENT_ID': client_id,
+                'INN_ID': inn_id,
+                'INN_NAME': event['INN_NAME'],
+                'TARGET_DRUGS_ID': event['DRUGS_ID'],
+                'TARGET_DRUGS_NAME': event['DRUGS_NAME'],
+                'TARGET_NFC1_ID': event['NFC1_ID'],
+                **sub
+            })
+
+        # 3. DiD розрахунки (з pre-indexed drug_index)
+        did_result = calculate_did_for_event(
+            event_with_post, df_inn, client_id, valid_substitutes,
+            drug_index=drug_index
+        )
+
+        # Перевірка чи є ефект
+        if did_result['TOTAL_EFFECT'] < MIN_TOTAL_FOR_SHARE:
+            validation_stats['no_effect'] += 1
+            continue
+
+        validation_stats['valid'] += 1
+
+        # Збираємо повний результат
+        full_result = {
+            'EVENT_ID': event_id,
+            'CLIENT_ID': client_id,
+            'INN_ID': inn_id,
+            'INN_NAME': event['INN_NAME'],
+            'DRUGS_ID': event['DRUGS_ID'],
+            'DRUGS_NAME': event['DRUGS_NAME'],
+            'NFC1_ID': event['NFC1_ID'],
+            'NFC_ID': event['NFC_ID'],
+            'STOCKOUT_START': event['STOCKOUT_START'].strftime('%Y-%m-%d'),
+            'STOCKOUT_END': event['STOCKOUT_END'].strftime('%Y-%m-%d'),
+            'STOCKOUT_WEEKS': event['STOCKOUT_WEEKS'],
+            'PRE_START': event['PRE_START'].strftime('%Y-%m-%d'),
+            'PRE_END': event['PRE_END'].strftime('%Y-%m-%d'),
+            'PRE_WEEKS': event['PRE_WEEKS'],
+            'PRE_AVG_Q': event['PRE_AVG_Q'],
+            'POST_START': post_result['POST_START'].strftime('%Y-%m-%d'),
+            'POST_END': post_result['POST_END'].strftime('%Y-%m-%d'),
+            'POST_WEEKS': post_result['POST_WEEKS'],
+            'POST_STATUS': post_result['POST_STATUS'],
+            **did_result
+        }
+
+        did_results.append(full_result)
+
+    return {
+        'did_results': did_results,
+        'substitute_mappings': substitute_mappings,
+        'validation_stats': validation_stats
+    }
+
+
+# =============================================================================
 # PROCESS SINGLE MARKET
 # =============================================================================
 
@@ -519,114 +660,55 @@ def process_market_did(client_id: int) -> Dict:
 
     # Групуємо по INN для оптимізації завантаження
     inn_groups = df_events.groupby('INN_ID')
+    inn_group_list = [(inn_id, inn_events) for inn_id, inn_events in inn_groups]
 
-    # Результати
-    all_did_results = []
-    all_substitute_mappings = []
-    validation_stats = {
-        'valid': 0,
-        'no_post_period': 0,
-        'no_substitutes': 0,
-        'no_effect': 0
-    }
-    inn_cache = {}  # Кеш завантажених INN даних
+    # Завантажуємо параметр INN-паралелізму
+    from project_core.calculation_parameters_config.machine_parameters import OPTIMAL_THREADS
+    n_threads = min(OPTIMAL_THREADS, len(inn_group_list))
 
-    # Обробка кожної INN групи
-    for inn_id, inn_events in inn_groups:
-        # Завантажуємо дані INN (з кешу або файлу)
-        if inn_id not in inn_cache:
-            inn_cache[inn_id] = load_inn_data(inn_id, client_id, paths)
+    # Обробка INN-груп (паралельно якщо n_threads > 1, інакше послідовно)
+    if n_threads > 1:
+        # === ПАРАЛЕЛЬНА ОБРОБКА INN-ГРУП (ThreadPoolExecutor) ===
+        all_did_results = []
+        all_substitute_mappings = []
+        validation_stats = {
+            'valid': 0,
+            'no_post_period': 0,
+            'no_substitutes': 0,
+            'no_effect': 0
+        }
 
-        df_inn = inn_cache[inn_id]
-
-        if df_inn.empty:
-            continue
-
-        # Pre-index: побудова словника {DRUGS_ID: DataFrame} для TARGET аптеки
-        # Будується один раз per INN, використовується всіма подіями цієї INN
-        df_target_inn = df_inn[df_inn['PHARM_ID'] == client_id]
-        drug_index = {did: grp for did, grp in df_target_inn.groupby('DRUGS_ID')}
-
-        # Обробка кожної події
-        for idx, event in inn_events.iterrows():
-            event_id = event['EVENT_ID']
-
-            # 1. Визначення POST-періоду
-            post_result = process_event_post_period(event, df_inn, client_id)
-
-            if not post_result['POST_VALID']:
-                validation_stats['no_post_period'] += 1
-                continue
-
-            # Додаємо POST до event
-            event_with_post = event.copy()
-            event_with_post['POST_START'] = post_result['POST_START']
-            event_with_post['POST_END'] = post_result['POST_END']
-            event_with_post['POST_WEEKS'] = post_result['POST_WEEKS']
-            event_with_post['POST_STATUS'] = post_result['POST_STATUS']
-            event_with_post['POST_VALID'] = post_result['POST_VALID']
-
-            # 2. Пошук валідних substitutes (з pre-indexed drug_index)
-            valid_substitutes = find_valid_substitutes(
-                event_with_post, df_inn, client_id, drug_index=drug_index
-            )
-
-            if len(valid_substitutes) == 0:
-                validation_stats['no_substitutes'] += 1
-                # Подія без substitutes - все йде до LOST_SALES
-                # Продовжуємо обробку, але INTERNAL_LIFT = 0
-
-            # Зберігаємо substitute mapping
-            for sub in valid_substitutes:
-                all_substitute_mappings.append({
-                    'EVENT_ID': event_id,
-                    'CLIENT_ID': client_id,
-                    'INN_ID': inn_id,
-                    'INN_NAME': event['INN_NAME'],
-                    'TARGET_DRUGS_ID': event['DRUGS_ID'],
-                    'TARGET_DRUGS_NAME': event['DRUGS_NAME'],
-                    'TARGET_NFC1_ID': event['NFC1_ID'],
-                    **sub
-                })
-
-            # 3. DiD розрахунки (з pre-indexed drug_index)
-            did_result = calculate_did_for_event(
-                event_with_post, df_inn, client_id, valid_substitutes,
-                drug_index=drug_index
-            )
-
-            # Перевірка чи є ефект
-            if did_result['TOTAL_EFFECT'] < MIN_TOTAL_FOR_SHARE:
-                validation_stats['no_effect'] += 1
-                continue
-
-            validation_stats['valid'] += 1
-
-            # Збираємо повний результат
-            full_result = {
-                'EVENT_ID': event_id,
-                'CLIENT_ID': client_id,
-                'INN_ID': inn_id,
-                'INN_NAME': event['INN_NAME'],
-                'DRUGS_ID': event['DRUGS_ID'],
-                'DRUGS_NAME': event['DRUGS_NAME'],
-                'NFC1_ID': event['NFC1_ID'],
-                'NFC_ID': event['NFC_ID'],
-                'STOCKOUT_START': event['STOCKOUT_START'].strftime('%Y-%m-%d'),
-                'STOCKOUT_END': event['STOCKOUT_END'].strftime('%Y-%m-%d'),
-                'STOCKOUT_WEEKS': event['STOCKOUT_WEEKS'],
-                'PRE_START': event['PRE_START'].strftime('%Y-%m-%d'),
-                'PRE_END': event['PRE_END'].strftime('%Y-%m-%d'),
-                'PRE_WEEKS': event['PRE_WEEKS'],
-                'PRE_AVG_Q': event['PRE_AVG_Q'],
-                'POST_START': post_result['POST_START'].strftime('%Y-%m-%d'),
-                'POST_END': post_result['POST_END'].strftime('%Y-%m-%d'),
-                'POST_WEEKS': post_result['POST_WEEKS'],
-                'POST_STATUS': post_result['POST_STATUS'],
-                **did_result
+        with ThreadPoolExecutor(max_workers=n_threads) as pool:
+            futures = {
+                pool.submit(
+                    _process_inn_group_did, inn_id, inn_events, client_id, paths
+                ): inn_id
+                for inn_id, inn_events in inn_group_list
             }
 
-            all_did_results.append(full_result)
+            for future in as_completed(futures):
+                inn_result = future.result()
+                all_did_results.extend(inn_result['did_results'])
+                all_substitute_mappings.extend(inn_result['substitute_mappings'])
+                for key in validation_stats:
+                    validation_stats[key] += inn_result['validation_stats'][key]
+    else:
+        # === ПОСЛІДОВНА ОБРОБКА (fallback, n_threads == 1) ===
+        all_did_results = []
+        all_substitute_mappings = []
+        validation_stats = {
+            'valid': 0,
+            'no_post_period': 0,
+            'no_substitutes': 0,
+            'no_effect': 0
+        }
+
+        for inn_id, inn_events in inn_group_list:
+            inn_result = _process_inn_group_did(inn_id, inn_events, client_id, paths)
+            all_did_results.extend(inn_result['did_results'])
+            all_substitute_mappings.extend(inn_result['substitute_mappings'])
+            for key in validation_stats:
+                validation_stats[key] += inn_result['validation_stats'][key]
 
     # Збереження результатів
     results = {

@@ -75,6 +75,25 @@ SHOW_PROGRESS = True
 
 
 # =============================================================================
+# INTRA-MARKET PARALLELISM (INN-рівневий паралелізм)
+# =============================================================================
+
+# Кількість потоків для INN-рівневого паралелізму всередині одного market worker.
+# Кожен worker-процес (inter-market) може запускати threads для обробки INN-груп.
+# ThreadPoolExecutor використовується тому що pandas звільняє GIL при C-операціях.
+#
+# Формула: min(4, max(1, CPU_LOGICAL_CORES // MAX_WORKERS))
+# Для поточної машини: min(4, 12 // 5) = 2
+#
+# Загальний ліміт активних потоків: MAX_WORKERS × THREADS_PER_WORKER
+# Для поточної машини: 5 × 2 = 10 (менше 12 logical cores — ок)
+#
+# УВАГА: Якщо INN-груп менше ніж THREADS_PER_WORKER, зайві потоки не створюються.
+# Значення 1 = відключити INN-паралелізм (послідовна обробка як раніше).
+THREADS_PER_WORKER = 2
+
+
+# =============================================================================
 # DISK PARAMETERS
 # =============================================================================
 
@@ -110,3 +129,25 @@ def get_optimal_workers() -> int:
 
 # Кількість workers для використання в пайплайні
 OPTIMAL_WORKERS = get_optimal_workers()
+
+
+def get_optimal_threads() -> int:
+    """
+    Розрахувати оптимальну кількість INN-потоків per worker.
+
+    Враховує:
+        - Кількість логічних ядер (ділимо на кількість workers)
+        - Не більше 4 (diminishing returns)
+        - Не менше 1 (мінімальний fallback)
+        - Не більше THREADS_PER_WORKER (ліміт конфігурації)
+
+    Returns:
+        int: Оптимальна кількість потоків per worker
+    """
+    cpu_based = max(1, CPU_LOGICAL_CORES // max(1, OPTIMAL_WORKERS))
+    optimal = min(cpu_based, 4, THREADS_PER_WORKER)
+    return max(1, optimal)
+
+
+# Кількість INN-потоків per worker
+OPTIMAL_THREADS = get_optimal_threads()
