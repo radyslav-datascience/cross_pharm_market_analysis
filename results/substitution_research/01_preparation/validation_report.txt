@@ -1,0 +1,22 @@
+======================================================================
+VALIDATION REPORT - Phase 2 Step 1: Data Preparation
+Generated: 2026-02-13 01:13:45
+======================================================================
+
+OVERALL STATUS: PASSED
+
+----------------------------------------
+VALIDATION CHECKS:
+----------------------------------------
+[OK] TOTAL_MARKETS: 10.0 = 10 (cross_market files)
+[OK] COVERAGE_CLUSTERS sum: 353.0 = 353 (total researched)
+[OK] SHARE_INTERNAL range: all 1675 values in [0, 1]
+[OK] TRIANGLE_STRUCTURE: first drug has max coverage (10)
+[OK] MARKET_MATCH: all 10 markets present in coefficients
+[OK] MARKET_COUNT for drug 4043: 10
+[OK] MARKET_COUNT for drug 6572: 10
+[OK] MARKET_COUNT for drug 7583: 10
+[OK] MARKET_COUNT for drug 8609: 10
+[OK] MARKET_COUNT for drug 17794: 10
+
+======================================================================
