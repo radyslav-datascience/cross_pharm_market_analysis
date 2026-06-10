@@ -1,0 +1,18 @@
+======================================================================
+VALIDATION REPORT — Phase 3 Step 2: Substitute Shares
+Generated: 2026-04-27 02:01:11
+======================================================================
+
+Method: LIFT-weighted aggregation
+  AGG_SHARE = SUM(TOTAL_LIFT) / SUM(INTERNAL_LIFT per market per drug)
+
+Validation checks:
+  [ 1] PASSED: SHARE_RANGE — all 11204 values in [0, 1]
+  [ 2] PASSED: SHARE_SUM_INVARIANT — 0 drugs with sum != 1.0 (±0.01)
+  [ 3] PASSED: NO_NAN_STOCKOUT_DRUG_ID — NaN: 0
+  [ 4] PASSED: NO_NAN_SUBSTITUTE_DRUG_ID — NaN: 0
+  [ 5] PASSED: NO_NAN_AGG_SUBSTITUTE_SHARE — NaN: 0
+  [ 6] PASSED: NO_DUPLICATE_PAIRS — duplicate pairs: 0
+  [ 7] PASSED: RANK1_COUNT — rank-1 count=304, unique drugs=304
+
+Overall: ALL PASSED

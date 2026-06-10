@@ -1,0 +1,32 @@
+======================================================================
+VALIDATION REPORT — 02_02_valid_data_filter
+Generated: 2026-03-11 16:39:08
+======================================================================
+
+Filter: Scenario A (strict)
+  COVERAGE_CLUSTER ∈ {HIGH, MEDIUM}
+  RELIABILITY ∈ {HIGH, MEDIUM}
+
+Thresholds from config:
+  COVERAGE_HIGH = 0.5 (≥50%)
+  COVERAGE_MEDIUM = 0.2 (≥20%)
+  RELIABILITY_HIGH = 0.15 (VARIATION_COEFFICIENT < 0.15)
+  RELIABILITY_MEDIUM = 0.3 (VARIATION_COEFFICIENT < 0.3)
+
+Validation checks:
+  [ 1] PASSED: COMPLETENESS — valid(242) + rejected(265) = 507, expected 507
+  [ 2] PASSED: VALID_NO_DUPLICATES — unique=242, total=242
+  [ 3] PASSED: REJECTED_NO_DUPLICATES — unique=265, total=265
+  [ 4] PASSED: NO_OVERLAP — overlap count: 0
+  [ 5] PASSED: VALID_COVERAGE_CRITERIA — all COVERAGE ∈ ['HIGH', 'MEDIUM']
+  [ 6] PASSED: VALID_RELIABILITY_CRITERIA — all RELIABILITY ∈ ['HIGH', 'MEDIUM']
+  [ 7] PASSED: REJECTED_HAVE_REASON — кожен відхилений має хоча б одну причину
+  [ 8] PASSED: CROSS_TABLE_TOTAL — cross-table total=507, expected=507
+  [ 9] PASSED: CROSS_TABLE_ROW_HIGH — sum=188, total=188
+  [10] PASSED: CROSS_TABLE_ROW_MEDIUM — sum=118, total=118
+  [11] PASSED: CROSS_TABLE_ROW_LOW — sum=65, total=65
+  [12] PASSED: CROSS_TABLE_ROW_INSUFFICIENT — sum=136, total=136
+  [13] PASSED: VALID_FILTER_STATUS — all FILTER_STATUS = 'VALID'
+  [14] PASSED: REJECTED_FILTER_STATUS — all FILTER_STATUS = 'REJECTED'
+
+Overall: ALL PASSED

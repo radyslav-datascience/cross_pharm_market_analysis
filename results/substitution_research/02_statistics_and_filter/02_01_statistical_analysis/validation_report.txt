@@ -1,0 +1,26 @@
+======================================================================
+VALIDATION REPORT - Phase 2 Step 2: Statistical Analysis
+Generated: 2026-03-11 16:39:05
+======================================================================
+
+OVERALL STATUS: PASSED
+
+----------------------------------------
+VALIDATION CHECKS:
+----------------------------------------
+[OK] DRUGS_COUNT: 507 = 507 (researched_drugs_list)
+[OK] MEDIAN_RANGE: all 507 values in [0, 1]
+[OK] MARKET_COUNT: all <= 97
+[OK] DISTRIBUTION_SUM: all 507 drugs bins sum = TOTAL
+[OK] FLAT_EXPORT: 19385 records = raw data
+[OK] CROSS_CHECK drug 596495: 1 markets
+[OK] CROSS_CHECK drug 287569: 1 markets
+[OK] CROSS_CHECK drug 960080: 3 markets
+[OK] CROSS_CHECK drug 358862: 1 markets
+[OK] CROSS_CHECK drug 792450: 1 markets
+[OK] VARIATION_COEFFICIENT_RANGE: all 470 values >= 0
+[OK] WEIGHTED_MEAN_RANGE: all 507 values in [0, 1]
+[OK] CI_LOGIC: all 479 CI contain MEAN
+[OK] MIN_MEAN_MAX: all 507 drugs MIN <= MEAN <= MAX
+
+======================================================================

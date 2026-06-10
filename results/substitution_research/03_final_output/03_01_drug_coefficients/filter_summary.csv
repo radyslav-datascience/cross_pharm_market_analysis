@@ -1,0 +1,13 @@
+METRIC,VALUE,DESCRIPTION
+TOTAL_RESEARCHED,507.0,Всього досліджених препаратів
+ACCEPTED,306.0,Пройшли фільтр (MARKET_COUNT >= 20)
+REJECTED,201.0,Відхилені (MARKET_COUNT < 20)
+ACCEPTANCE_RATIO,0.6036,Частка прийнятих
+MIN_MARKET_COUNT,20.0,Поріг мінімальної кількості ринків
+MAX_MARKET_COUNT_ALL,94.0,Максимум ринків серед усіх
+MAX_MARKET_COUNT_REJECTED,19.0,Максимум ринків серед відхилених
+MEDIAN_COEF_ACCEPTED,0.7273,Медіана MEDIAN_SUBSTITUTION_COEF (прийняті)
+MEAN_COEF_ACCEPTED,0.6843,Середнє MEDIAN_SUBSTITUTION_COEF (прийняті)
+COEF_HIGH_COUNT,170.0,Коефіцієнт >= 0.7 (HIGH)
+COEF_MEDIUM_COUNT,105.0,Коефіцієнт 0.4-0.7 (MEDIUM)
+COEF_LOW_COUNT,31.0,Коефіцієнт < 0.4 (LOW)
