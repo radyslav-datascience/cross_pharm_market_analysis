@@ -2,8 +2,9 @@
 
 <p align="center">
   When a pharmacy runs out of a drug, where does the demand go?<br>
-  A Difference-in-Differences pipeline that measures drug substitution coefficients<br>
-  across local pharmacy markets — at scale, in parallel.
+  A Difference-in-Differences pipeline that measures per-drug substitution coefficients<br>
+  across 99 local pharmacy markets — separating drugs the pharmacy can safely optimize<br>
+  from drugs whose stock-out permanently loses customers to competitors.
 </p>
 
 <p align="center">
@@ -31,6 +32,15 @@
 
 ---
 
+## Key Findings
+
+- **54% of drugs are SUBSTITUTABLE** — when they go out of stock, the pharmacy retains demand internally: customers switch to an alternative on the same shelf. These drugs can be safely de-prioritized in inventory without losing revenue.
+- **46% of drugs are CRITICAL** — stock-out means the customer leaves for a competitor pharmacy. For these drugs, a missed order is a permanently lost sale and a permanently weakened customer relationship.
+- **Coverage rate 47.7% is a structural property of the market**, not a data artifact — validated as stable across 5 independent study scenarios (range: 44.4–47.7%), independently of which pharmacies are in the dataset or how many markets are included.
+- **DiD isolates the pure substitution signal** — a naive before/after comparison of sales would be confounded by promotions, seasonality, and general market shifts. The pipeline removes all of these by using competitor pharmacies in the same local market as the control group.
+
+---
+
 ## The Business Problem
 
 Every stock-out event forces a customer to make a choice:
@@ -43,24 +53,45 @@ Customer arrives for Drug X (out of stock at target pharmacy)
 └── Leaves to buy Drug X at a competitor pharmacy     →  LOST demand      (SHARE_LOST)
 ```
 
-The **substitution coefficient** (SHARE_INTERNAL) quantifies this split per drug across multiple local markets. A drug with coefficient 0.9 retains 90% of demand internally when it goes out of stock — it is safe to optimize in the SKU portfolio. A drug with coefficient 0.1 is critical: 90% of its demand walks out the door.
+The **substitution coefficient** (SHARE_INTERNAL) quantifies this split per drug, aggregated across 99 local markets. It enables two fundamentally different inventory decisions:
 
-This pipeline computes these coefficients using the **Difference-in-Differences (DiD)** econometric method — isolating the pure substitution effect from seasonal trends, promotions, and general market shifts.
+| Coefficient | Classification | Business decision |
+|:---:|:---:|:---|
+| ≥ 0.5 | **SUBSTITUTABLE** | Optimize inventory depth — if this drug is missing, customers buy an alternative in the same pharmacy. Stock-out does not cost you the customer. |
+| < 0.5 | **CRITICAL** | Maintain stock reliability — if this drug is missing, the customer leaves for a competitor. Every stock-out is a loyalty event, not just a missed sale. |
+
+Before this project, pharmacies had no systematic way to distinguish between these two groups at scale. Inventory decisions were made by gut feel, category rules, or supplier pressure — not by measured customer behavior under stock-out conditions.
+
+---
+
+## Why Difference-in-Differences
+
+A naive approach — comparing drug sales at a pharmacy before and after a stock-out — cannot isolate the substitution effect. Sales go up and down for dozens of reasons: seasonality, promotions, competitor price changes, flu season. Any observed change is a confounded mix of all of them.
+
+**DiD controls for all of this** by introducing a control group: competitor pharmacies in the same local market that experienced no stock-out. Whatever happens to sales at competitors during the same period is "background noise" — market-wide dynamics unrelated to the stock-out event. DiD subtracts that noise from what happened at the target pharmacy:
+
+```
+LIFT = (Actual sales at target) − (Expected sales based on competitor dynamics)
+```
+
+If a competitor's sales of Drug Y went up 15% during a period when the target pharmacy ran out of Drug X, some of that increase is the substitution effect and some is just market-wide growth. DiD separates them. The share of the LIFT that stays inside the target pharmacy on day of restock measures `SHARE_INTERNAL` — the substitution coefficient.
+
+This requires sufficient observations per drug: enough stock-out events across enough markets to produce a statistically reliable median. The pipeline enforces coverage (≥ 20% of markets) and reliability (CV < 0.30) thresholds before including a drug's coefficient in the final output.
 
 ---
 
 ## Key Results
 
-| Metric | Value |
-|:---|:---|
-| Local pharmacy markets analyzed | **99** |
-| Unique drugs in raw data | **~650** |
-| Drugs with completed DiD research | **~240** (~47.7% coverage rate) |
-| Drugs classified as SUBSTITUTABLE | **~54%** — pharmacy retains demand |
-| Drugs classified as CRITICAL | **~46%** — demand lost to competitors |
-| Validated cross-study Pearson r | **≥ 0.997** (see validation projects below) |
+| Metric | Value | What it means |
+|:---|:---|:---|
+| Local pharmacy markets | **99** | Each market = one target pharmacy + its local competitors |
+| Unique drugs in raw data | **~650** | Total distinct drugs observed having stock-out events |
+| Drugs with reliable coefficients | **~240** (~47.7%) | Passed both coverage (≥ 20% markets) and reliability (CV < 0.30) filters |
+| SUBSTITUTABLE drugs | **~54%** | Pharmacy retains demand — safe to optimize inventory depth |
+| CRITICAL drugs | **~46%** | Demand lost to competitors — must maintain stock reliability |
+| Cross-study coefficient stability | **r ≥ 0.997** | Same drug, different pharmacies, different markets — results reproduce |
 
-> Results independently validated across 5 research scenarios in [pharm_market_data_sufficiency_detection](https://github.com/radyslav-datascience/pharm_market_data_sufficiency_detection) and analyzed at per-drug distribution level in [substitution_coefficient_validation](https://github.com/radyslav-datascience/substitution_coefficient_validation).
+> The 47.7% coverage rate and r ≥ 0.997 stability are independently confirmed across 5 research scenarios in [pharm_market_data_sufficiency_detection](https://github.com/radyslav-datascience/pharm_market_data_sufficiency_detection). Per-drug distribution structure and minimum sample requirements are analyzed in [substitution_coefficient_validation](https://github.com/radyslav-datascience/substitution_coefficient_validation).
 
 ---
 
@@ -183,7 +214,7 @@ python exec_scripts/run_full_pipeline.py --from-step 7
 
 ## Data Privacy
 
-Raw input CSV files and per-market substitution results (which contain drug names paired with coefficients) are not included in this repository. The `results/` folder contains only a single-market sample (`market_substitution_28670/`) for reference.
+Raw input CSV files and per-market substitution results (which contain drug names paired with per-market coefficients) are not included in this repository. The published `results/` folder contains only aggregate statistics: coverage rates, filter summaries, and validation reports — no drug names are paired with quantitative metrics in any published file.
 
 All pharmacy and market identifiers use internal numeric IDs — no business names, addresses, or ownership information is exposed.
 
